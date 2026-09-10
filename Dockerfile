@@ -3,7 +3,7 @@ FROM --platform=linux/amd64 ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # =========================================================
-# XFCE + VNC + noVNC + tools
+# BASE + XFCE + VNC + NOVNC
 # =========================================================
 RUN apt update -y && apt install --no-install-recommends -y \
     xfce4 \
@@ -27,14 +27,15 @@ RUN apt update -y && apt install --no-install-recommends -y \
     x11-xserver-utils \
     x11-apps \
     xdg-utils \
+    exo-utils \
+    desktop-file-utils \
     gnupg \
     ca-certificates \
     openssl \
-    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 # =========================================================
-# Microsoft Edge
+# MICROSOFT EDGE REPOSITORY
 # =========================================================
 RUN mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
@@ -43,12 +44,15 @@ RUN mkdir -p /etc/apt/keyrings && \
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main" \
     > /etc/apt/sources.list.d/microsoft-edge.list
 
+# =========================================================
+# INSTALL MICROSOFT EDGE
+# =========================================================
 RUN apt update -y && \
     apt install -y microsoft-edge-stable && \
     rm -rf /var/lib/apt/lists/*
 
 # =========================================================
-# Edge safe launcher
+# SAFE EDGE LAUNCHER
 # =========================================================
 RUN cat > /usr/local/bin/edge-safe <<'EOF'
 #!/bin/bash
@@ -67,23 +71,40 @@ EOF
 
 RUN chmod +x /usr/local/bin/edge-safe
 
-# Replace desktop launcher
-RUN if [ -f /usr/share/applications/microsoft-edge.desktop ]; then \
-        sed -i 's|^Exec=.*|Exec=/usr/local/bin/edge-safe %U|' \
-        /usr/share/applications/microsoft-edge.desktop; \
-    fi
+# =========================================================
+# CREATE CLEAN EDGE DESKTOP ENTRY
+# =========================================================
+RUN cat > /usr/share/applications/microsoft-edge-safe.desktop <<'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Microsoft Edge
+GenericName=Web Browser
+Comment=Microsoft Edge Web Browser
+Exec=/usr/local/bin/edge-safe %U
+Icon=microsoft-edge
+Terminal=false
+StartupNotify=true
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+Keywords=browser;web;internet;
+EOF
+
+RUN chmod 644 /usr/share/applications/microsoft-edge-safe.desktop && \
+    update-desktop-database /usr/share/applications || true
 
 # =========================================================
-# XFCE settings
+# VNC DIRECTORY
 # =========================================================
-RUN mkdir -p /root/.vnc \
+RUN mkdir -p \
+    /root/.vnc \
     /root/.config/microsoft-edge \
     /root/.config/xfce4/xfconf/xfce-perchannel-xml
 
 RUN touch /root/.Xauthority
 
 # =========================================================
-# VNC xstartup
+# XFCE VNC STARTUP
 # =========================================================
 RUN cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/sh
@@ -96,103 +117,59 @@ export XDG_SESSION_DESKTOP=xfce
 export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
 export XDG_DATA_DIRS=/usr/share/xfce4:/usr/local/share:/usr/share
 
-xrdb "$HOME/.Xresources" 2>/dev/null || true
-
+# Start XFCE
 startxfce4 &
+
+# Wait for X/desktop to initialize
+sleep 5
+
+# =========================================================
+# SET MICROSOFT EDGE AS DEFAULT BROWSER
+# Must be done AFTER X session exists.
+# =========================================================
+export DISPLAY=:1
+
+xdg-settings set default-web-browser microsoft-edge-safe.desktop 2>/dev/null || true
+
+# Explicit MIME associations
+xdg-mime default microsoft-edge-safe.desktop text/html 2>/dev/null || true
+xdg-mime default microsoft-edge-safe.desktop application/xhtml+xml 2>/dev/null || true
+xdg-mime default microsoft-edge-safe.desktop x-scheme-handler/http 2>/dev/null || true
+xdg-mime default microsoft-edge-safe.desktop x-scheme-handler/https 2>/dev/null || true
 EOF
 
 RUN chmod +x /root/.vnc/xstartup
 
 # =========================================================
-# noVNC configuration
-#
-# Force viewport clipping so the Drag/Hand control
-# can be used when the remote desktop is larger
-# than the mobile browser viewport.
+# XFCE DEFAULT APPLICATIONS
 # =========================================================
-RUN python3 - <<'PY'
-from pathlib import Path
-
-paths = [
-    Path("/usr/share/novnc/vnc.html"),
-    Path("/usr/share/novnc/app/ui.js"),
-]
-
-for p in paths:
-    if p.exists():
-        print("Found:", p)
-PY
+RUN mkdir -p /root/.config/xfce4 && \
+    cat > /root/.config/xfce4/helpers.rc <<'EOF'
+WebBrowser=microsoft-edge-safe
+EOF
 
 # =========================================================
-# Custom noVNC startup page
+# FORCE XFCE TO USE EDGE
 # =========================================================
-RUN cp /usr/share/novnc/vnc.html /usr/share/novnc/vnc-original.html
-
-RUN python3 - <<'PY'
-from pathlib import Path
-
-p = Path("/usr/share/novnc/vnc.html")
-
-if p.exists():
-    text = p.read_text()
-
-    # Add default URL parameters.
-    # view_clip=1  -> Clip to Window
-    # resize=off   -> Don't resize the remote desktop
-    # This keeps the desktop larger than the phone viewport,
-    # allowing viewport movement.
-    marker = '<body>'
-
-    if marker in text and 'view_clip=1' not in text:
-        text = text.replace(
-            marker,
-            '''<body>
-<script>
-(function () {
-    try {
-        const url = new URL(window.location.href);
-
-        if (!url.searchParams.has("view_clip")) {
-            url.searchParams.set("view_clip", "1");
-        }
-
-        if (!url.searchParams.has("resize")) {
-            url.searchParams.set("resize", "off");
-        }
-
-        history.replaceState(null, "", url.toString());
-    } catch (e) {
-        console.log("noVNC viewport configuration:", e);
-    }
-})();
-</script>''',
-            1
-        )
-
-    p.write_text(text)
-PY
+RUN cat > /usr/share/xfce4/helpers/microsoft-edge-safe.desktop <<'EOF'
+[Xfce Helpers]
+Name=Microsoft Edge
+Icon=microsoft-edge
+StartupNotify=true
+X-XFCE-Binaries=microsoft-edge-safe
+X-XFCE-Category=WebBrowser
+X-XFCE-Commands=%B %U
+X-XFCE-CommandsWithParameter=%B %U
+EOF
 
 # =========================================================
-# Custom JavaScript patch
-#
-# Make sure viewport clipping is enabled after connection.
-# =========================================================
-RUN if [ -f /usr/share/novnc/app/ui.js ]; then \
-    cp /usr/share/novnc/app/ui.js /usr/share/novnc/app/ui-original.js; \
-fi
-
-# =========================================================
-# Ports
+# PORTS
 # =========================================================
 EXPOSE 5901
 EXPOSE 6080
 
 # =========================================================
-# Start VNC + noVNC
-#
-# 1920x1080 intentionally makes the remote desktop larger
-# than a typical Android viewport, so viewport dragging
-# becomes useful.
+# START VNC + NOVNC
 # =========================================================
 CMD bash -c '\
     rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true; \
