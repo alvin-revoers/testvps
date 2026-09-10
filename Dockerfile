@@ -3,7 +3,7 @@ FROM --platform=linux/amd64 ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # =========================================================
-# BASE + XFCE + VNC + NOVNC
+# XFCE + VNC + noVNC + tools
 # =========================================================
 RUN apt update -y && apt install --no-install-recommends -y \
     xfce4 \
@@ -35,7 +35,7 @@ RUN apt update -y && apt install --no-install-recommends -y \
     && rm -rf /var/lib/apt/lists/*
 
 # =========================================================
-# MICROSOFT EDGE REPOSITORY
+# MICROSOFT EDGE
 # =========================================================
 RUN mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
@@ -44,15 +44,12 @@ RUN mkdir -p /etc/apt/keyrings && \
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main" \
     > /etc/apt/sources.list.d/microsoft-edge.list
 
-# =========================================================
-# INSTALL MICROSOFT EDGE
-# =========================================================
 RUN apt update -y && \
     apt install -y microsoft-edge-stable && \
     rm -rf /var/lib/apt/lists/*
 
 # =========================================================
-# SAFE EDGE LAUNCHER
+# EDGE SAFE LAUNCHER
 # =========================================================
 RUN cat > /usr/local/bin/edge-safe <<'EOF'
 #!/bin/bash
@@ -72,7 +69,7 @@ EOF
 RUN chmod +x /usr/local/bin/edge-safe
 
 # =========================================================
-# CREATE CLEAN EDGE DESKTOP ENTRY
+# EDGE DESKTOP ENTRY
 # =========================================================
 RUN cat > /usr/share/applications/microsoft-edge-safe.desktop <<'EOF'
 [Desktop Entry]
@@ -90,23 +87,34 @@ MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme
 Keywords=browser;web;internet;
 EOF
 
-RUN chmod 644 /usr/share/applications/microsoft-edge-safe.desktop && \
-    update-desktop-database /usr/share/applications || true
+RUN chmod 644 /usr/share/applications/microsoft-edge-safe.desktop
+
+RUN update-desktop-database /usr/share/applications || true
 
 # =========================================================
-# VNC DIRECTORY
+# VNC START SCRIPT
 # =========================================================
-RUN mkdir -p \
-    /root/.vnc \
-    /root/.config/microsoft-edge \
-    /root/.config/xfce4/xfconf/xfce-perchannel-xml
+RUN mkdir -p /root/.vnc && \
+    touch /root/.Xauthority
 
-RUN touch /root/.Xauthority
+RUN cat > /usr/local/bin/start-vnc.sh <<'EOF'
+#!/bin/bash
 
-# =========================================================
-# XFCE VNC STARTUP
-# =========================================================
-RUN cat > /root/.vnc/xstartup <<'EOF'
+set -e
+
+# ---------------------------------------------------------
+# Clean old VNC locks
+# ---------------------------------------------------------
+rm -f /tmp/.X1-lock
+rm -f /tmp/.X11-unix/X1
+
+mkdir -p /root/.vnc
+touch /root/.Xauthority
+
+# ---------------------------------------------------------
+# ALWAYS CREATE xstartup BEFORE vncserver
+# ---------------------------------------------------------
+cat > /root/.vnc/xstartup <<'STARTUP'
 #!/bin/sh
 
 unset SESSION_MANAGER
@@ -120,47 +128,60 @@ export XDG_DATA_DIRS=/usr/share/xfce4:/usr/local/share:/usr/share
 # Start XFCE
 startxfce4 &
 
-# Wait for X/desktop to initialize
+# Wait until XFCE is ready
 sleep 5
 
-# =========================================================
-# SET MICROSOFT EDGE AS DEFAULT BROWSER
-# Must be done AFTER X session exists.
-# =========================================================
-export DISPLAY=:1
-
+# ---------------------------------------------------------
+# Set Microsoft Edge as default browser
+# ---------------------------------------------------------
 xdg-settings set default-web-browser microsoft-edge-safe.desktop 2>/dev/null || true
 
-# Explicit MIME associations
 xdg-mime default microsoft-edge-safe.desktop text/html 2>/dev/null || true
 xdg-mime default microsoft-edge-safe.desktop application/xhtml+xml 2>/dev/null || true
 xdg-mime default microsoft-edge-safe.desktop x-scheme-handler/http 2>/dev/null || true
 xdg-mime default microsoft-edge-safe.desktop x-scheme-handler/https 2>/dev/null || true
+STARTUP
+
+chmod +x /root/.vnc/xstartup
+
+echo "========================================"
+echo "xstartup created:"
+ls -l /root/.vnc/xstartup
+echo "========================================"
+
+# ---------------------------------------------------------
+# Start TigerVNC
+# ---------------------------------------------------------
+vncserver \
+    -localhost no \
+    -SecurityTypes None \
+    -geometry 1920x1080 \
+    -depth 24 \
+    -xstartup /root/.vnc/xstartup \
+    --I-KNOW-THIS-IS-INSECURE
+
+# ---------------------------------------------------------
+# Generate SSL certificate
+# ---------------------------------------------------------
+openssl req -new \
+    -subj "/C=JP" \
+    -x509 \
+    -days 365 \
+    -nodes \
+    -out /tmp/self.pem \
+    -keyout /tmp/self.pem
+
+# ---------------------------------------------------------
+# Start noVNC
+# ---------------------------------------------------------
+exec websockify \
+    --web /usr/share/novnc/ \
+    6080 \
+    localhost:5901 \
+    --cert /tmp/self.pem
 EOF
 
-RUN chmod +x /root/.vnc/xstartup
-
-# =========================================================
-# XFCE DEFAULT APPLICATIONS
-# =========================================================
-RUN mkdir -p /root/.config/xfce4 && \
-    cat > /root/.config/xfce4/helpers.rc <<'EOF'
-WebBrowser=microsoft-edge-safe
-EOF
-
-# =========================================================
-# FORCE XFCE TO USE EDGE
-# =========================================================
-RUN cat > /usr/share/xfce4/helpers/microsoft-edge-safe.desktop <<'EOF'
-[Xfce Helpers]
-Name=Microsoft Edge
-Icon=microsoft-edge
-StartupNotify=true
-X-XFCE-Binaries=microsoft-edge-safe
-X-XFCE-Category=WebBrowser
-X-XFCE-Commands=%B %U
-X-XFCE-CommandsWithParameter=%B %U
-EOF
+RUN chmod +x /usr/local/bin/start-vnc.sh
 
 # =========================================================
 # PORTS
@@ -169,25 +190,6 @@ EXPOSE 5901
 EXPOSE 6080
 
 # =========================================================
-# START VNC + NOVNC
+# START
 # =========================================================
-CMD bash -c '\
-    rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true; \
-    vncserver -localhost no \
-        -SecurityTypes None \
-        -geometry 1920x1080 \
-        -depth 24 \
-        --I-KNOW-THIS-IS-INSECURE && \
-    openssl req -new \
-        -subj "/C=JP" \
-        -x509 \
-        -days 365 \
-        -nodes \
-        -out /tmp/self.pem \
-        -keyout /tmp/self.pem && \
-    websockify \
-        --web /usr/share/novnc/ \
-        6080 \
-        localhost:5901 \
-        --cert /tmp/self.pem \
-'
+CMD ["/usr/local/bin/start-vnc.sh"]
