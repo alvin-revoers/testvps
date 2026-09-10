@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 ubuntu:24.04
+FROM --platform=linux/amd64 ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -80,8 +80,6 @@ RUN touch /root/.Xauthority
 
 # =========================================================
 # NOVNC — aktifkan tombol hand/drag (pan/scroll) secara default
-# Script kecil ini otomatis "klik" tombol drag begitu halaman
-# noVNC selesai dimuat, jadi user tidak perlu klik manual.
 # =========================================================
 RUN sed -i 's#</body>#<script>\
 document.addEventListener("DOMContentLoaded", function () {\
@@ -120,22 +118,44 @@ xdg-mime default microsoft-edge-safe.desktop x-scheme-handler/https 2>/dev/null 
 EOF
 RUN chmod +x /root/.vnc/xstartup
 
-EXPOSE 5901
-EXPOSE 6080
+# =========================================================
+# START SCRIPT — dipisah dari CMD supaya tidak rawan
+# ke-wrap/patah saat file di-copy-paste antar editor
+# =========================================================
+RUN cat > /usr/local/bin/start-vnc.sh <<'EOF'
+#!/bin/bash
+set -e
 
-CMD bash -c "vncserver -localhost no -SecurityTypes None -geometry 1280x800 -depth 24 -xstartup /root/.vnc/xstartup --I-KNOW-THIS-IS-INSECURE && openssl req -new -subj '/C=JP' -x509 -days 365 -nodes -out /tmp/self.pem -keyout /tmp/self.pem && websockify --web /usr/share/novnc/ 6080 localhost:5901 --cert /tmp/self.pem"
---cert /tmp/self.pem
+rm -f /tmp/.X1-lock
+rm -f /tmp/.X11-unix/X1
+
+vncserver \
+    -localhost no \
+    -SecurityTypes None \
+    -geometry 1280x800 \
+    -depth 24 \
+    -xstartup /root/.vnc/xstartup \
+    --I-KNOW-THIS-IS-INSECURE
+
+if [ ! -f /tmp/self.pem ]; then
+    openssl req -new \
+        -subj "/C=JP" \
+        -x509 \
+        -days 365 \
+        -nodes \
+        -out /tmp/self.pem \
+        -keyout /tmp/self.pem
+fi
+
+exec websockify \
+    --web /usr/share/novnc/ \
+    6080 \
+    localhost:5901 \
+    --cert /tmp/self.pem
 EOF
-
 RUN chmod +x /usr/local/bin/start-vnc.sh
 
-# =========================================================
-# PORTS
-# =========================================================
 EXPOSE 5901
 EXPOSE 6080
 
-# =========================================================
-# START
-# =========================================================
 CMD ["/usr/local/bin/start-vnc.sh"]
