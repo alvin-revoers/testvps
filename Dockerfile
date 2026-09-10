@@ -2,8 +2,10 @@ FROM --platform=linux/amd64 ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt update -y && \
-    apt install --no-install-recommends -y \
+# =========================================================
+# SYSTEM + DESKTOP + GPG
+# =========================================================
+RUN apt-get update && apt-get install --no-install-recommends -y \
     xfce4 \
     xfce4-goodies \
     tigervnc-standalone-server \
@@ -16,6 +18,7 @@ RUN apt update -y && \
     snapd \
     vim \
     net-tools \
+    iproute2 \
     curl \
     wget \
     git \
@@ -24,47 +27,64 @@ RUN apt update -y && \
     x11-utils \
     x11-xserver-utils \
     x11-apps \
+    xdg-utils \
     openssl \
+    ca-certificates \
     software-properties-common \
+    gnupg \
+    gnupg2 \
+    gpg-agent \
+    dirmngr \
     && rm -rf /var/lib/apt/lists/*
 
-# Firefox PPA
+# =========================================================
+# MOZILLA FIREFOX PPA
+# =========================================================
+RUN mkdir -p /etc/apt/apt.conf.d /etc/apt/preferences.d
+
 RUN add-apt-repository ppa:mozillateam/ppa -y
 
-# Firefox preferences
-RUN echo 'Package: *' >> /etc/apt/preferences.d/mozilla-firefox && \
-    echo 'Pin: release o=LP-PPA-mozillateam' >> /etc/apt/preferences.d/mozilla-firefox && \
-    echo 'Pin-Priority: 1001' >> /etc/apt/preferences.d/mozilla-firefox
-
-# FIX: apt.conf.d, bukan conf.d
-RUN echo 'Unattended-Upgrade::Allowed-Origins:: "LP-PPA-mozillateam:jammy";' \
-    > /etc/apt/apt.conf.d/51unattended-upgrades-firefox
-
-RUN apt update -y && \
-    apt install -y firefox xubuntu-icon-theme && \
-    rm -rf /var/lib/apt/lists/*
+# Prioritas Firefox dari Mozilla PPA
+RUN printf '%s\n' \
+    'Package: firefox*' \
+    'Pin: release o=LP-PPA-mozillateam' \
+    'Pin-Priority: 1001' \
+    > /etc/apt/preferences.d/mozilla-firefox
 
 # =========================================================
-# START SCRIPT
+# FIREFOX
 # =========================================================
+RUN apt-get update && \
+    apt-get install -y \
+        firefox \
+        xubuntu-icon-theme \
+    && rm -rf /var/lib/apt/lists/*
+
+# =========================================================
+# XFCE / VNC STARTUP
+# Dibuat saat CONTAINER START, bukan hanya saat build
+# =========================================================
+RUN mkdir -p /usr/local/bin
+
 RUN cat > /usr/local/bin/start.sh <<'EOF'
 #!/bin/bash
-
 set -e
 
-echo "========================================"
-echo "Preparing VNC"
-echo "========================================"
+echo "======================================"
+echo " Starting XFCE + TigerVNC + noVNC"
+echo "======================================"
 
-# Bersihkan session lama
-rm -rf /tmp/.X1-lock
-rm -rf /tmp/.X11-unix/X1
+# Bersihkan display lama
+rm -f /tmp/.X1-lock
+rm -f /tmp/.X11-unix/X1
 
+mkdir -p /tmp/.X11-unix
 mkdir -p /root/.vnc
+
 touch /root/.Xauthority
 
 # =========================================================
-# BUAT XSTARTUP SAAT CONTAINER START
+# CREATE VNC XSTARTUP
 # =========================================================
 cat > /root/.vnc/xstartup <<'STARTUP'
 #!/bin/sh
@@ -77,36 +97,24 @@ export XDG_SESSION_DESKTOP=xfce
 export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
 export XDG_DATA_DIRS=/usr/share/xfce4:/usr/local/share:/usr/share
 
+# DBus
+if command -v dbus-launch >/dev/null 2>&1; then
+    eval "$(dbus-launch --sh-syntax)"
+fi
+
+# XFCE
 exec startxfce4
 STARTUP
 
 chmod 755 /root/.vnc/xstartup
 
-echo "========================================"
-echo "Checking xstartup"
-echo "========================================"
-
-if [ ! -f /root/.vnc/xstartup ]; then
-    echo "ERROR: xstartup was not created!"
-    exit 1
-fi
-
-if [ ! -x /root/.vnc/xstartup ]; then
-    echo "ERROR: xstartup is not executable!"
-    exit 1
-fi
-
-ls -lah /root/.vnc/xstartup
+echo "xstartup:"
+ls -la /root/.vnc/xstartup
 
 # =========================================================
 # START TIGERVNC
 # =========================================================
-echo "========================================"
-echo "Starting TigerVNC"
-echo "========================================"
-
-vncserver \
-    :1 \
+vncserver :1 \
     -localhost no \
     -SecurityTypes None \
     -geometry 1024x768 \
@@ -114,18 +122,23 @@ vncserver \
     -xstartup /root/.vnc/xstartup \
     --I-KNOW-THIS-IS-INSECURE
 
-# Pastikan VNC benar-benar hidup
+echo "TigerVNC started."
+
+# Pastikan VNC listen
+sleep 2
+
 if ! ss -lnt | grep -q ':5901'; then
-    echo "ERROR: TigerVNC is not listening on 5901!"
+    echo "ERROR: TigerVNC tidak listen di port 5901"
     exit 1
 fi
 
-echo "TigerVNC is running on port 5901"
+echo "VNC listening on 5901."
 
 # =========================================================
-# SSL CERTIFICATE
+# SSL CERTIFICATE UNTUK NOVNC
 # =========================================================
-openssl req -new \
+openssl req \
+    -new \
     -subj "/C=JP" \
     -x509 \
     -days 365 \
@@ -134,11 +147,9 @@ openssl req -new \
     -keyout /tmp/self.pem
 
 # =========================================================
-# START NOVNC
+# START NOVNC / WEBSOCKIFY
 # =========================================================
-echo "========================================"
-echo "Starting noVNC on port 6080"
-echo "========================================"
+echo "Starting noVNC on port 6080..."
 
 exec websockify \
     --web /usr/share/novnc/ \
@@ -149,7 +160,13 @@ EOF
 
 RUN chmod 755 /usr/local/bin/start.sh
 
+# =========================================================
+# PORTS
+# =========================================================
 EXPOSE 5901
 EXPOSE 6080
 
+# =========================================================
+# START
+# =========================================================
 CMD ["/usr/local/bin/start.sh"]
