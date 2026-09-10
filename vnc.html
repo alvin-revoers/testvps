@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NoVNC</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000}iframe{width:100%;height:100%;border:0}</style></head>
+<body>
+<iframe id="vnc" src="/vnc-real.html?autoconnect=1&resize=remote&clip=1"></iframe>
+<script>
+const frame=document.getElementById('vnc');
+let lastSent=0;
+function activity(){
+  const now=Date.now();
+  if(now-lastSent<1000)return;
+  lastSent=now;
+  fetch('/api/activity',{method:'POST'}).then(r=>{if(r.status===401)location.href='/index.html'}).catch(()=>{});
+}
+['pointerdown','pointermove','pointerup','mousedown','mouseup','mousemove','wheel','touchstart','touchmove','keydown','keyup'].forEach(ev=>document.addEventListener(ev,activity,{passive:true,capture:true}));
+frame.addEventListener('load',()=>{
+  try{
+    const d=frame.contentWindow.document;
+    ['pointerdown','pointermove','pointerup','mousedown','mouseup','mousemove','wheel','touchstart','touchmove','keydown','keyup'].forEach(ev=>d.addEventListener(ev,mark,{passive:true,capture:true}));
+    const hand=d.getElementById('noVNC_view_drag_button');
+    if(hand){ hand.classList.remove('noVNC_hidden'); hand.style.display='block'; hand.title='Move/Drag viewport'; }
+  }catch(e){}
+});
+// Client-side idle lock. This is based on real browser input activity, not a fixed session lifetime.
+const IDLE=10*60*1000;
+let lastActivity=Date.now();
+function mark(){lastActivity=Date.now();activity()}
+['pointerdown','pointermove','pointerup','mousedown','mouseup','mousemove','wheel','touchstart','touchmove','keydown','keyup'].forEach(ev=>window.addEventListener(ev,mark,{passive:true,capture:true}));
+setInterval(()=>{if(Date.now()-lastActivity>=IDLE){location.href='/index.html'}},5000);
+</script>
+</body></html>
